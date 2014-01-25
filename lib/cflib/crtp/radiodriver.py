@@ -63,6 +63,10 @@ logger = logging.getLogger(__name__)
 class RadioDriver(CRTPDriver):
     """ Crazyradio link driver """
 
+    # Class variable containing currently in-use transfer threads
+    #: :type: dict of (int, _RadioTransferThread)
+    transfer_threads = {}
+
     def __init__(self):
         """ Create the link driver """
         CRTPDriver.__init__(self)
@@ -74,6 +78,8 @@ class RadioDriver(CRTPDriver):
         self.out_queue = None
         self._thread = None
         self.needs_resending = True
+        self._profile = None
+        self._radio_id = None
 
     def connect(self, uri, link_quality_callback, link_error_callback):
         """
@@ -112,19 +118,29 @@ class RadioDriver(CRTPDriver):
         if uri_data.group(7) == "2M":
             datarate = Crazyradio.DR_2MPS
 
-        if self.cradio is None:
-            self.cradio = Crazyradio(devid=int(uri_data.group(1)))
-        else:
-            raise Exception("Link already open!")
+        self._radio_id = int(uri_data.group(1))
 
-        if self.cradio.version >= 0.4:
-            self.cradio.set_arc(10)
-        else:
-            logger.warning("Radio version <0.4 will be obsoleted soon!")
+        self._profile = _RadioProfile(channel, datarate)
 
-        self.cradio.set_channel(channel)
+        if not self.transfer_threads.has_key(self._radio_id):
+            if self.cradio is None:
+                self.cradio = Crazyradio(devid=self._radio_id)
+            else:
+                raise Exception("Link already open!")
 
-        self.cradio.set_data_rate(datarate)
+            if self.cradio.version >= 0.4:
+                self.cradio.set_arc(10)
+            else:
+                logger.warning("Radio version <0.4 will be obsoleted soon!")
+
+            self.transfer_threads[self._radio_id] = _RadioTransferThread(self.cradio)
+            self.transfer_threads[self._radio_id].setDaemon(True)
+
+            self.transfer_threads[self._radio_id].start()
+
+        #Connect this profile to the transfers thread
+        pid = self.transfer_threads[self._radio_id].add_profile()
+        self._profile.pid = pid
 
         if uri_data.group(9):
             addr = str(uri_data.group(9))
@@ -137,8 +153,8 @@ class RadioDriver(CRTPDriver):
         self.out_queue = queue.Queue(1)
 
         # Launch the comm thread
-        self._thread = _RadioDriverThread(self.cradio, self.in_queue,
-                                          self.out_queue,
+        self._thread = _RadioDriverThread(self.transfer_threads[self._radio_id], self._profile,
+                                          self.in_queue, self.out_queue,
                                           link_quality_callback,
                                           link_error_callback,
                                           self)
@@ -171,7 +187,7 @@ class RadioDriver(CRTPDriver):
         """ Send the packet pk though the link """
         # if self.out_queue.full():
         #    self.out_queue.get()
-        if (self.cradio is None):
+        if self._profile is None:
             return
 
         try:
@@ -189,8 +205,8 @@ class RadioDriver(CRTPDriver):
         if self._thread:
             return
 
-        self._thread = _RadioDriverThread(self.cradio, self.in_queue,
-                                          self.out_queue,
+        self._thread = _RadioDriverThread(self.transfer_threads[self._radio_id], self._profile,
+                                          self.in_queue, self.out_queue,
                                           self.link_quality_callback,
                                           self.link_error_callback,
                                           self)
@@ -201,14 +217,7 @@ class RadioDriver(CRTPDriver):
         # Stop the comm thread
         self._thread.stop()
 
-        # Close the USB dongle
-        try:
-            if self.cradio:
-                self.cradio.close()
-        except:
-            # If we pull out the dongle we will not make this call
-            pass
-        self.cradio = None
+        self.transfer_threads[self._radio_id].remove_profile(self._profile.pid)
 
         while not self.out_queue.empty():
             self.out_queue.get()
@@ -337,11 +346,12 @@ class _RadioDriverThread(threading.Thread):
 
     RETRYCOUNT_BEFORE_DISCONNECT = 10
 
-    def __init__(self, cradio, inQueue, outQueue, link_quality_callback,
-                 link_error_callback, link):
+    def __init__(self, transfers_thread, profile, inQueue, outQueue,
+                 link_quality_callback, link_error_callback):
         """ Create the object """
         threading.Thread.__init__(self)
-        self.cradio = cradio
+        self.transfers_thread = transfers_thread
+        self._profile = profile
         self.in_queue = inQueue
         self.out_queue = outQueue
         self.sp = False
@@ -406,10 +416,7 @@ class _RadioDriverThread(threading.Thread):
                 break
 
             try:
-                if self.has_safelink:
-                    ackStatus = self._send_packet_safe(self.cradio, dataOut)
-                else:
-                    ackStatus = self.cradio.send_packet(dataOut)
+                ackStatus = self.transfers_thread.send_packet(self._profile, dataOut)
             except Exception as e:
                 import traceback
 
@@ -464,7 +471,6 @@ class _RadioDriverThread(threading.Thread):
                     waitTime = 0
 
             # get the next packet to send of relaxation (wait 10ms)
-            outPacket = None
             try:
                 outPacket = self.out_queue.get(True, waitTime)
             except queue.Empty:
@@ -482,3 +488,74 @@ class _RadioDriverThread(threading.Thread):
                         dataOut.append(ord(X))
             else:
                 dataOut.append(0xFF)
+
+
+class _RadioProfile:
+    def __init__(self, channel, rate):
+        self.pid = -1
+        self.channel = channel
+        self.rate = rate
+
+
+class _RadioTransferThread(threading.Thread):
+    """ Thread that handles transfer for a single crazyradio hardware
+    Can handles transfers form more than one radio profile (ie. link to a copter)
+    """
+
+    def __init__(self, cradio):
+        threading.Thread.__init__(self)
+        assert isinstance(cradio, Crazyradio)
+        self._current_channel = 2
+        self._current_rate = Crazyradio.DR_2MPS
+        self._current_power = Crazyradio.P_0DBM
+        self.cradio = cradio
+
+        self.cradio.set_channel(self._current_channel)
+        self.cradio.set_data_rate(self._current_rate)
+        self.cradio.set_power(self._current_power)
+
+        self.rx_queues = []
+        self.tx_queue = Queue.Queue()
+
+    def add_profile(self):
+        #Garbage collect: Use holes in the queue list in priority
+        id = 0
+        for q in self.rx_queues:
+            if not q:
+                break
+            id += 1
+
+        if id<len(self.rx_queues):
+            self.rx_queues[id] = Queue.Queue()
+        else:
+            self.rx_queues += [Queue.Queue(), ]
+
+        return id
+
+    def remove_profile(self, id):
+        self.rx_queues[id] = None
+
+    def send_packet(self, profile, data):
+        self.tx_queue.put([profile, data])
+        return self.rx_queues[profile.pid].get()
+
+    def run(self):
+        #Simply service transfers requests
+        while True:
+            tx = self.tx_queue.get()
+            ack = self._send_packet(tx[0], tx[1])
+            if ack.data:
+                logger.debug("received data from {}".format(tx[0].pid))
+            self.rx_queues[tx[0].pid].put(ack)
+
+    def _send_packet(self, profile, data):
+        """
+        Send packet making sure the radio is configured for the
+        right transfers profile
+        """
+        assert isinstance(profile, _RadioProfile)
+        if self._current_channel != profile.channel:
+            self.cradio.set_channel(profile.channel)
+        if self._current_rate != profile.rate:
+            self.cradio.set_data_rate(profile.rate)
+        return self.cradio.send_packet(data)
