@@ -219,13 +219,6 @@ class RadioDriver(CRTPDriver):
 
         self.transfer_threads[self._radio_id].remove_profile(self._profile.pid)
 
-        while not self.out_queue.empty():
-            self.out_queue.get()
-
-        # Clear callbacks
-        self.link_error_callback = None
-        self.link_quality_callback = None
-
     def _scan_radio_channels(self, start=0, stop=125):
         """ Scan for Crazyflies between the supplied channels. """
         return list(self.cradio.scan_channels(start, stop, (0xff,)))
