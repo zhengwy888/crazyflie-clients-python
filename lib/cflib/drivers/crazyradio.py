@@ -108,6 +108,7 @@ class Crazyradio:
     P_M12DBM = 1
     P_M6DBM = 2
     P_0DBM = 3
+    DEFAULT_ADDRESS = (0xE7,) * 5
 
     def __init__(self, device=None, devid=0):
         """ Create object and scan for USB dongle if no device is supplied """
@@ -142,7 +143,7 @@ class Crazyradio:
         self.arc = -1
         if self.version >= 0.4:
             self.set_cont_carrier(False)
-            self.set_address((0xE7,) * 5)
+            self.set_address(self.DEFAULT_ADDRESS)
             self.set_power(self.P_0DBM)
             self.set_arc(3)
             self.set_ard_bytes(32)
@@ -163,6 +164,7 @@ class Crazyradio:
     def set_channel(self, channel):
         """ Set the radio channel to be used """
         _send_vendor_setup(self.handle, SET_RADIO_CHANNEL, channel, 0, ())
+        self.channel = channel
 
     def set_address(self, address):
         """ Set the radio address to be used"""
@@ -171,14 +173,17 @@ class Crazyradio:
                             " bytes long")
 
         _send_vendor_setup(self.handle, SET_RADIO_ADDRESS, 0, 0, address)
+        self.address = address
 
     def set_data_rate(self, datarate):
         """ Set the radio datarate to be used """
         _send_vendor_setup(self.handle, SET_DATA_RATE, datarate, 0, ())
+        self.data_rate = datarate
 
     def set_power(self, power):
         """ Set the radio power to be used """
         _send_vendor_setup(self.handle, SET_RADIO_POWER, power, 0, ())
+        self.power = power
 
     def set_arc(self, arc):
         """ Set the ACK retry count for radio communication """
@@ -201,15 +206,18 @@ class Crazyradio:
         if (t > 0xF):
             t = 0xF
         _send_vendor_setup(self.handle, SET_RADIO_ARD, t, 0, ())
+        self.ard_time = t
 
     def set_ard_bytes(self, nbytes):
         _send_vendor_setup(self.handle, SET_RADIO_ARD, 0x80 | nbytes, 0, ())
+        self.ard_bytes = nbytes
 
     def set_cont_carrier(self, active):
         if active:
             _send_vendor_setup(self.handle, SET_CONT_CARRIER, 1, 0, ())
         else:
             _send_vendor_setup(self.handle, SET_CONT_CARRIER, 0, 0, ())
+        self.cont_carrier = active
 
     def _has_fw_scan(self):
         # return self.version >= 0.5
