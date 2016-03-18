@@ -126,7 +126,7 @@ class RadioDriver(CRTPDriver):
 
         self._profile = _RadioProfile(channel, datarate, new_addr)
 
-        if not self.transfer_threads.has_key(self._radio_id)
+        if not self.transfer_threads.has_key(self._radio_id):
             self.transfer_threads[self._radio_id] = _RadioTransferThread(self._radio_id)
             self.transfer_threads[self._radio_id].setDaemon(True)
 
@@ -318,7 +318,7 @@ class _RadioDriverThread(threading.Thread):
     RETRYCOUNT_BEFORE_DISCONNECT = 10
 
     def __init__(self, transfers_thread, profile, inQueue, outQueue,
-                 link_quality_callback, link_error_callback):
+                 link_quality_callback, link_error_callback, link):
         """ Create the object """
         threading.Thread.__init__(self)
         self.transfers_thread = transfers_thread
@@ -370,17 +370,6 @@ class _RadioDriverThread(threading.Thread):
         dataOut = array.array('B', [0xFF])
         waitTime = 0
         emptyCtr = 0
-
-        # Try up to 10 times to enable the safelink mode
-        for _ in range(10):
-            resp = self.cradio.send_packet((0xff, 0x05, 0x01))
-            if resp and resp.data and tuple(resp.data) == (0xff, 0x05, 0x01):
-                self.has_safelink = True
-                self.curr_up = 0
-                self.curr_down = 0
-                break
-        logging.info("Has safelink: {}".format(self.has_safelink))
-        self._link.needs_resending = not self.has_safelink
 
         while (True):
             if (self.sp):
@@ -480,12 +469,12 @@ class _RadioTransferThread(threading.Thread):
 
         self.rx_queues = []
         self._num_profiles = 0
-        self.tx_queue = Queue.Queue()
+        self.tx_queue = queue.Queue()
         self.sp = False
 
     def add_profile(self):
         self._num_profiles += 1
-        rx_queue = Queue.Queue()
+        rx_queue = queue.Queue()
         return rx_queue
 
     def remove_profile(self, id):
